@@ -22,7 +22,7 @@ type WSMessage struct {
 // HandleWebSocket manages the WebSocket connection for users
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool { return true }, // Allow any origin
+		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
 	// Upgrade HTTP connection to WebSocket
