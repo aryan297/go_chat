@@ -3,7 +3,6 @@ package handlers
 import (
 	"chat-app/config"
 	"chat-app/models"
-	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -11,61 +10,92 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		return true
-	},
+var clients = make(map[string]*websocket.Conn) // Mapping of user IDs to their WebSocket connection
+
+// WebSocket message struct
+type WSMessage struct {
+	FromUser string `json:"fromUser"`
+	ToUser   string `json:"toUser"`
+	Message  string `json:"message"`
 }
 
+// HandleWebSocket manages the WebSocket connection for users
 func HandleWebSocket(w http.ResponseWriter, r *http.Request) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool { return true }, // Allow any origin
+	}
+
 	// Upgrade HTTP connection to WebSocket
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("Failed to upgrade to WebSocket: %v", err)
+		log.Printf("Failed to upgrade connection: %v", err)
 		return
 	}
 	defer conn.Close()
 
-	db := config.GetDB()
-	collection := db.Collection("chats")
+	// Get user ID from URL path
+	userID := r.URL.Path[len("/ws/"):]
 
+	// Add user to active clients map
+	clients[userID] = conn
+	log.Printf("User %s connected", userID)
+
+	// Ensure to remove user from map when connection closes
+	defer func() {
+		delete(clients, userID)
+		log.Printf("User %s disconnected", userID)
+	}()
+
+	// Listen for incoming messages
 	for {
-		// Read message from client
-		_, msg, err := conn.ReadMessage()
+		var msg WSMessage
+		err := conn.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("Error reading WebSocket message: %v", err)
+			log.Printf("Error reading message: %v", err)
 			break
 		}
 
-		// Unmarshal the message into a ChatMessage struct
-		var chatMsg models.Chat
-		err = json.Unmarshal(msg, &chatMsg)
+		// Send message to the target user if they are connected
+		sendMessageToUser(msg)
+
+		// Save message in MongoDB
+		saveMessageInDB(msg)
+	}
+}
+
+// sendMessageToUser sends a message to the intended recipient via WebSocket
+func sendMessageToUser(msg WSMessage) {
+	toUserConn, ok := clients[msg.ToUser]
+	if ok {
+		// Send message to the recipient
+		err := toUserConn.WriteJSON(msg)
 		if err != nil {
-			log.Printf("Invalid message format: %v", err)
-			continue
+			log.Printf("Error sending message to %s: %v", msg.ToUser, err)
+		} else {
+			log.Printf("Message sent from %s to %s: %s", msg.FromUser, msg.ToUser, msg.Message)
 		}
+	} else {
+		log.Printf("User %s not connected", msg.ToUser)
+	}
+}
 
-		// Check if userId is provided
-		if chatMsg.UserID == "" {
-			log.Println("User ID not provided")
-			continue
-		}
+// saveMessageInDB saves the message to MongoDB for persistence
+func saveMessageInDB(msg WSMessage) {
+	message := models.Message{
+		FromUser:  msg.FromUser,
+		ToUser:    msg.ToUser,
+		Content:   msg.Message,
+		Timestamp: time.Now(),
+	}
 
-		// Add timestamp
-		chatMsg.Timestamp = time.Now()
+	// Get MongoDB collection
+	collection := config.GetDB().Collection("messages")
 
-		// Save to MongoDB
-		_, err = collection.InsertOne(r.Context(), chatMsg)
-		if err != nil {
-			log.Printf("Failed to save message: %v", err)
-			continue
-		}
-
-		// Echo message back to client
-		err = conn.WriteJSON(chatMsg)
-		if err != nil {
-			log.Printf("Error sending message back: %v", err)
-			break
-		}
+	// Insert the message into MongoDB
+	_, err := collection.InsertOne(nil, message)
+	if err != nil {
+		log.Printf("Error saving message to DB: %v", err)
+	} else {
+		log.Printf("Message from %s to %s saved in DB", msg.FromUser, msg.ToUser)
 	}
 }
